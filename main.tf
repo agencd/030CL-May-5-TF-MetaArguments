@@ -32,7 +32,11 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
   enable_dns_hostnames = true
   tags = {
-    Name = "${var.prefix}-vpc"
+    Name = "${var.prefix}-vpc2"
+    Age = "42"
+  }
+  lifecycle {
+    ignore_changes = [ tags ]
   }
 }
 
@@ -51,6 +55,56 @@ resource "aws_subnet" "public_2" {
   availability_zone = "us-east-1b"
   tags = {
     Name = "${var.prefix}-public-subnet_2"
+  }
+}
+
+resource "aws_subnet" "public_3" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.3.0/24"
+  availability_zone = "us-east-1b"
+  tags = {
+    Name = "${var.prefix}-public-subnet_3"
+  }
+  lifecycle {
+    replace_triggered_by = [ aws_vpc.main ]
+  }
+}
+
+variable "create_public_subnet_4" {
+  type        = bool
+  description = "Create a fourth public subnet"
+  default     = true
+}
+
+resource "aws_subnet" "public_4" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.4.0/24"
+  availability_zone = "us-east-1b"
+  tags = {
+    Name = "${var.prefix}-public-subnet_4"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.create_public_subnet_4
+      error_message = "var.create_public_subnet_4 must be true to create this subnet"
+    }
+  }
+}
+
+resource "aws_subnet" "public_5" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.5.0/24"
+  availability_zone = "us-east-1b"
+  tags = {
+    Name = "${var.prefix}-public-subnet_5"
+  }
+
+  lifecycle {
+    postcondition {
+      condition     = aws_subnet.public_4.availability_zone == "us-east-1b"
+      error_message = "The availability zone of public_4 must be us-east-1b"
+    }
   }
 }
 
@@ -172,6 +226,10 @@ resource "aws_key_pair" "deployer" {
   key_name   = "deployer-key"
   public_key = file("~/.ssh/id_ed25519.pub")
 }
+resource "aws_key_pair" "deployer2" {
+  key_name   = "deployer-key-2"
+  public_key = file("~/.ssh/id_ed25519.pub")
+}
 
 resource "aws_launch_template" "default" {
   name_prefix = "${var.prefix}-launch-template-"
@@ -182,7 +240,6 @@ resource "aws_launch_template" "default" {
     associate_public_ip_address = true
     delete_on_termination       = true
     subnet_id                  = aws_subnet.public.id
-    #security_groups            = [module.sg.security_groups["web-sg"].id]
     security_groups            = [module.sg.security_group_ids["web-sg"]]
   }
   user_data = base64encode(<<-EOF
@@ -213,9 +270,9 @@ resource "aws_autoscaling_group" "default" {
     id      = aws_launch_template.default.id
     version = "$Latest"
   }
-  min_size           = 5
-  max_size           = 8
-  desired_capacity   = 5
+  min_size           = 1
+  max_size           = 2
+  desired_capacity   = 2
   vpc_zone_identifier = [aws_subnet.public.id , aws_subnet.public_2.id]
   tag {
     key                 = "Name"
@@ -223,6 +280,10 @@ resource "aws_autoscaling_group" "default" {
     propagate_at_launch = true
   }
   target_group_arns = [ aws_lb_target_group.default.arn ]
+
+  lifecycle {
+    prevent_destroy = false
+  }
 }
 
 resource "aws_lb" "default" {
@@ -233,7 +294,6 @@ resource "aws_lb" "default" {
   subnets            = [aws_subnet.public.id, aws_subnet.public_2.id]
 
   enable_deletion_protection = false
-
 }
 
 resource "aws_lb_target_group" "default" {
@@ -270,4 +330,27 @@ resource "aws_autoscaling_attachment" "asg_alb" {
   alb_target_group_arn   = aws_lb_target_group.default.arn
 }
 
+resource "aws_instance" "web_server" {
+  ami           = data.aws_ami.amzn-linux-2023-ami.id
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public.id
+  vpc_security_group_ids = [module.sg.security_group_ids["web-sg"]]
+  key_name      = aws_key_pair.deployer2.key_name
+  user_data_replace_on_change = true
+  user_data = <<-EOF
+              #!/bin/bash
+              sudo yum update -y
+              sudo yum install -y httpd
+              sudo systemctl start httpd.service
+              sudo systemctl enable httpd.service
+              sudo echo "<h1> Hello World from Class 30 on Apr 28 </h1>" > /var/www/html/index.html                   
+              EOF 
 
+  tags = {
+    Name = "${var.prefix}-web-instance"
+  }
+  lifecycle {
+    create_before_destroy = false # Default is false
+  }
+
+}
